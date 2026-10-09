@@ -65,11 +65,11 @@ async function run(){
     if(!r.ok)throw new Error(d.error||'Erreur');
     const s=d.seed;
     let h='<div class="card"><h2>Ta chanson</h2><div class="row"><img src="'+esc(s.cover)+'" alt=""><div><b>'+esc(s.title)+'</b> — '+esc(s.artist)
-      +'<div class="k">'+esc(meta(s))+'</div>'+(s.accords?'<div class="k">Accords : '+esc(s.accords)+'</div>':'')+chips(s.instruments)
+      +'<div class="k">'+esc(meta(s))+'</div><div class="k" id="dgs"></div>'+(s.accords?'<div class="k">Accords : '+esc(s.accords)+'</div>':'')+chips(s.instruments)
       +(s.preview?'<audio controls preload="none" src="'+esc(s.preview)+'"></audio>':'')+'</div></div></div>'
 ;
     const rec=(t,i)=>'<div class="rec" id="r'+i+'" data-s="'+t.score+'"><div class="row"><img src="'+esc(t.cover)+'" alt=""><div style="flex:1"><b>'+esc(t.title)+'</b> — '+esc(t.artist)
-      +'<div class="k" id="m'+i+'">'+esc(meta(t))+(t.preview?' · analyse du tempo…':'')+'</div><p>Pourquoi : <span id="w'+i+'">'+esc(t.why)+'</span></p>'
+      +'<div class="k" id="m'+i+'">'+esc(meta(t))+(t.preview?' · analyse du tempo…':'')+'</div><p>Pourquoi : <span id="w'+i+'">'+esc(t.why)+'</span></p><div class="k" id="dg'+i+'"></div>'
       +(t.preview?'<audio controls preload="none" src="'+esc(t.preview)+'"></audio>':'')
       +chips(t.instruments)+(t.accords?'<div class="k">Accords : '+esc(t.accords)+'</div>':'')
       +links(t)+'</div><div class="score" id="s'+i+'">'+t.score+'%</div></div></div>';
@@ -87,27 +87,55 @@ async function run(){
   }catch(e){out.innerHTML='<p class="msg">'+esc(e.message)+'</p>'}
   $('go').disabled=false;
 }
+let NOD=false;
+async function getD(artist,title){
+  try{
+    const r=await fetch('/api/discogs?artist='+encodeURIComponent(artist)+'&title='+encodeURIComponent(title));
+    const d=await r.json();
+    if(d.error){if(d.error.includes('DISCOGS_TOKEN'))NOD=true;return null}
+    return d;
+  }catch(e){return null}
+}
+const dtxt=d=>'Discogs : '+d.styles.slice(0,4).join(', ')+(d.year?' · '+d.year:'')+(d.have?' · '+fmt(d.have)+' collectionneurs':'');
 async function enrich(s,rs,my){
+  const sd=await getD(s.artist,s.title);
+  if(my!==RUN)return;
+  if(sd&&$('dgs'))$('dgs').textContent=dtxt(sd);
   for(let i=0;i<rs.length;i++){
     if(my!==RUN)return;
     const t=rs[i],m=$('m'+i);if(!m)return;
-    if(!t.preview)continue;
-    try{
-      const r=await fetch('/api/analyze?url='+encodeURIComponent(t.preview)+(s.bpm?'&bpm='+s.bpm+'&pc='+s.pc+'&mode='+s.mode:''));
-      const a=await r.json();
-      if(my!==RUN)return;
-      if(!r.ok||a.error){m.textContent=meta(t);continue}
-      m.textContent=[t.genre,a.bpm+' BPM',a.key,pl(t)].filter(Boolean).join(' · ');
-      const x=[];
+    const pA=t.preview?fetch('/api/analyze?url='+encodeURIComponent(t.preview)+(s.bpm?'&bpm='+s.bpm+'&pc='+s.pc+'&mode='+s.mode:'')).then(r=>r.json().then(j=>[r.ok,j])).catch(()=>[false,{}]):Promise.resolve([false,{}]);
+    const pD=NOD?Promise.resolve(null):getD(t.artist,t.title);
+    const [[ok,a],d]=await Promise.all([pA,pD]);
+    if(my!==RUN)return;
+    const x=[],parts=[t.genre];let ts=null,ks=null,sr=null;
+    if(ok&&!a.error){
+      parts.push(a.bpm+' BPM',a.key);
       if(a.tempo_sim!=null){
-        x.push(a.tempo_sim>0.7?'tempo proche ('+a.bpm+' vs '+s.bpm+' BPM)':'tempo différent ('+a.bpm+' vs '+s.bpm+' BPM)');
-        x.push(a.key_sim>0.7?'tonalité compatible':'tonalité éloignée');
-        const f=Math.round(0.5*t.score+30*a.tempo_sim+20*a.key_sim);
-        $('r'+i).dataset.s=f;$('s'+i).textContent=f+'%';
-        const L=$('r'+i).parentNode;[...L.children].sort((p,q)=>q.dataset.s-p.dataset.s).forEach(e=>L.appendChild(e));
+        ts=a.tempo_sim;ks=a.key_sim;
+        x.push(ts>0.7?'tempo proche ('+a.bpm+' vs '+s.bpm+' BPM)':'tempo différent ('+a.bpm+' vs '+s.bpm+' BPM)');
+        x.push(ks>0.7?'tonalité compatible':'tonalité éloignée');
       }
-      if(x.length)$('w'+i).textContent=t.why+', '+x.join(', ');
-    }catch(e){m.textContent=meta(t)}
+    }
+    parts.push(pl(t));
+    m.textContent=parts.filter(Boolean).join(' · ');
+    if(d&&d.styles&&d.styles.length){
+      $('dg'+i).textContent=dtxt(d);
+      if(sd&&sd.styles&&sd.styles.length){
+        const low=sd.styles.map(z=>z.toLowerCase()),com=d.styles.filter(z=>low.includes(z.toLowerCase()));
+        sr=Math.min(1,com.length/Math.max(1,Math.min(2,sd.styles.length)));
+        x.push(com.length?'styles Discogs communs : '+com.join(', '):'styles Discogs différents');
+      }
+    }
+    let f=null;
+    if(ts!=null)f=sr!=null?0.45*t.score+25*ts+15*ks+15*sr:0.5*t.score+30*ts+20*ks;
+    else if(sr!=null)f=0.7*t.score+30*sr;
+    if(f!=null){
+      f=Math.min(100,Math.round(f));
+      $('r'+i).dataset.s=f;$('s'+i).textContent=f+'%';
+      const L=$('r'+i).parentNode;[...L.children].sort((p,q)=>q.dataset.s-p.dataset.s).forEach(e=>L.appendChild(e));
+    }
+    if(x.length)$('w'+i).textContent=t.why+', '+x.join(', ');
   }
 }
 $('go').onclick=run;$('q').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
