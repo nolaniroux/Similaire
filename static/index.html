@@ -56,15 +56,30 @@ async function run(){
       +(s.preview?'<audio controls preload="none" src="'+esc(s.preview)+'"></audio>':'')+'</div></div></div>'
       +'<div class="card"><h2>Chansons similaires</h2>';
     if(!d.results.length)h+='<p class="msg">Aucune chanson similaire trouvée. Essaie « titre artiste ».</p>';
-    d.results.forEach(t=>{
+    d.results.forEach((t,i)=>{
       h+='<div class="rec"><div class="row"><img src="'+esc(t.cover)+'" alt=""><div style="flex:1"><b>'+esc(t.title)+'</b> — '+esc(t.artist)
-        +'<div class="k">'+esc(meta(t))+'</div><p>Pourquoi : '+esc(t.why)+'</p>'
+        +'<div class="k" id="m'+i+'">'+esc(meta(t))+(t.preview?' · analyse du tempo…':'')+'</div><p>Pourquoi : <span id="w'+i+'">'+esc(t.why)+'</span></p>'
         +(t.preview?'<audio controls preload="none" src="'+esc(t.preview)+'"></audio>':'')
         +'<a href="'+esc(t.link)+'" target="_blank" rel="noopener">Écouter en entier sur Deezer</a></div><div class="score">'+t.score+'%</div></div></div>';
     });
     out.innerHTML=h+'</div>';
+    enrich(s,d.results);
   }catch(e){out.innerHTML='<p class="msg">'+esc(e.message)+'</p>'}
   $('go').disabled=false;
+}
+async function enrich(s,rs){
+  for(let i=0;i<rs.length;i++){
+    const t=rs[i],m=$('m'+i);if(!m)return;
+    if(!t.preview)continue;
+    try{
+      const r=await fetch('/api/analyze?url='+encodeURIComponent(t.preview)+(s.bpm?'&bpm='+s.bpm+'&pc='+s.pc+'&mode='+s.mode:''));
+      const a=await r.json();
+      if(!r.ok||a.error){m.textContent=meta(t);continue}
+      m.textContent=[t.genre,a.bpm+' BPM',a.key].filter(Boolean).join(' · ');
+      const x=[];if(a.tempo_sim>0.7)x.push('tempo proche');if(a.key_sim>0.7)x.push('tonalité compatible');
+      if(x.length)$('w'+i).textContent+=', '+x.join(', ');
+    }catch(e){m.textContent=meta(t)}
+  }
 }
 $('go').onclick=run;$('q').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
 </script>
