@@ -9,6 +9,8 @@ import io
 import json
 import math
 import os
+import re
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 
@@ -67,6 +69,7 @@ def analyze(preview_url):
                     best = (c, pc, mode)
         return round(bpm), best[1], best[2]
     except Exception:
+        print("ANALYSE ECHEC:", traceback.format_exc(), flush=True)
         return None
 
 
@@ -99,6 +102,38 @@ def lastfm_similar(artist, title):
         timeout=15,
     ).json()
     return r.get("similartracks", {}).get("track", [])
+
+
+def clean_title(t):
+    t = re.sub(r"^\d{6,8}\s+", "", t)  # préfixe de date
+    t = re.sub(r"\s*[\(\[].*?[\)\]]", "", t)  # (Live), [Remastered]...
+    t = re.sub(r"\s+-\s+(remaster|live|radio|single|version|acoustic).*$", "", t, flags=re.I)
+    return t.strip()
+
+
+def lastfm_call(method, **params):
+    return HTTP.get("https://ws.audioscrobbler.com/2.0/",
+                    params={"method": method, "api_key": LASTFM_KEY, "format": "json", "autocorrect": 1, **params},
+                    timeout=15).json()
+
+
+def get_candidates(seed):
+    artist, title = seed["artist"]["name"], clean_title(seed["title"])
+    found = lastfm_similar(artist, title)
+    if found:
+        return found
+    # Plan B : artistes similaires, puis leur titre le plus connu
+    arts = lastfm_call("artist.getsimilar", artist=artist, limit=14).get("similarartists", {}).get("artist", [])
+
+    def top(a):
+        try:
+            t = lastfm_call("artist.gettoptracks", artist=a["name"], limit=1).get("toptracks", {}).get("track", [])
+            return {"name": t[0]["name"], "artist": {"name": a["name"]}, "match": float(a.get("match", 0)) * 0.8} if t else None
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        return [r for r in pool.map(top, arts) if r]
 
 
 # ---------- Claude (optionnel) : accords et instruments ----------
@@ -150,7 +185,7 @@ def similar():
 
     seen = {seed["artist"]["name"].lower()}
     cands = []
-    for c in lastfm_similar(seed["artist"]["name"], seed["title"]):
+    for c in get_candidates(seed):
         a = c["artist"]["name"]
         if a.lower() not in seen:  # un seul titre par artiste
             seen.add(a.lower())
