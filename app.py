@@ -166,36 +166,47 @@ def get_candidates(seed):
 
 
 # ---------- Claude (optionnel) : accords et instruments ----------
+INSTRUMENTS = ["guitare", "piano", "batterie", "basse", "synthétiseur", "violon",
+               "saxophone", "trompette", "flûte", "orgue", "percussions", "voix"]
 _desc_cache = {}
 
 
-def describe(title, artist):
-    """Accords et instruments estimés par Gemini (optionnel)."""
+def describe_many(items):
+    """Une seule requête Gemini pour toutes les chansons.
+    items = [(titre, artiste), ...] -> ({index: {accords, instruments}}, message_erreur)"""
     if not GEMINI_KEY:
-        return {}
-    key = (title, artist)
+        return None, "clé GEMINI_API_KEY non configurée sur Render."
+    key = tuple(items)
     if key in _desc_cache:
-        return _desc_cache[key]
+        return _desc_cache[key], ""
+    lines = "\n".join(f"{i}. {t} — {a}" for i, (t, a) in enumerate(items))
+    prompt = (
+        "Pour chacune de ces chansons, donne en français la progression d'accords typique "
+        "et les instruments principaux audibles. Pour les instruments, utilise uniquement "
+        f"des mots de cette liste : {', '.join(INSTRUMENTS)}.\n{lines}\n"
+        'Réponds avec un tableau JSON, un objet par chanson, dans le même ordre : '
+        '[{"i":0,"accords":"...","instruments":["..."]}]'
+    )
     try:
         r = HTTP.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
             headers={"x-goog-api-key": GEMINI_KEY},
-            json={
-                "contents": [{"parts": [{"text":
-                    f'Chanson : "{title}" de {artist}. Donne en français la progression d\'accords typique '
-                    'et les instruments principaux. Réponds avec ce JSON : '
-                    '{"accords":"...","instruments":["..."]}'}]}],
-                "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
-            },
-            timeout=40,
+            json={"contents": [{"parts": [{"text": prompt}]}],
+                  "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}},
+            timeout=60,
         ).json()
+        if "candidates" not in r:
+            msg = (r.get("error") or {}).get("message", "réponse vide")
+            print("IA ECHEC (Gemini):", msg, flush=True)
+            return None, "Gemini : " + msg[:150]
         text = r["candidates"][0]["content"]["parts"][0]["text"]
-        out = json.loads(text[text.index("{"): text.rindex("}") + 1])
+        arr = json.loads(text[text.index("["): text.rindex("]") + 1])
+        out = {int(o["i"]): {"accords": o.get("accords", ""), "instruments": o.get("instruments", [])} for o in arr}
         _desc_cache[key] = out
-        return out
+        return out, ""
     except Exception:
         print("IA ECHEC:", traceback.format_exc(), flush=True)
-        return {}
+        return None, "erreur de l'IA (voir les Logs Render)."
 
 
 def card(t):
@@ -210,6 +221,7 @@ def card(t):
 @app.route("/api/similar")
 def similar():
     q = request.args.get("q", "").strip()
+    same = request.args.get("sim") == "1"  # filtre « instruments similaires »
     if not q:
         return jsonify(error="Entre un titre."), 400
     if not LASTFM_KEY:
@@ -220,8 +232,6 @@ def similar():
         return jsonify(error="Chanson introuvable. Essaie « titre artiste »."), 404
     seed_card = card(seed)
     seed_an = analyze(seed["preview"]) if seed.get("preview") else None
-    extra = describe(seed["title"], seed["artist"]["name"])
-    seed_card.update(extra)
     if seed_an:
         seed_card["bpm"], seed_card["key"] = seed_an[0], key_name(seed_an[1], seed_an[2])
         seed_card["pc"], seed_card["mode"] = seed_an[1], seed_an[2]
@@ -233,7 +243,7 @@ def similar():
         if a.lower() not in seen:  # un seul titre par artiste
             seen.add(a.lower())
             cands.append(c)
-        if len(cands) >= 14:
+        if len(cands) >= (24 if same else 14):
             break
 
     def process(c):
@@ -258,7 +268,28 @@ def similar():
         results = [r for r in pool.map(process, cands) if r]
     print(f"CANDIDATS: {len(cands)} -> VERIFIES: {len(results)}", flush=True)
     results.sort(key=lambda r: -r["score"])
-    return jsonify(seed=seed_card, results=results[:8])
+    results = results[:20]
+    info, err = describe_many([(seed["title"], seed["artist"]["name"])] + [(r["title"], r["artist"]) for r in results])
+    notice = ""
+    if info:
+        seed_card.update(info.get(0, {}))
+        for i, r in enumerate(results, 1):
+            r.update(info.get(i, {}))
+        ref = {norm(x) for x in seed_card.get("instruments", []) if x}
+        if same and ref:  # on garde les chansons qui partagent au moins la moitié des instruments
+            need = max(1, math.ceil(len(ref) / 2))
+            kept = []
+            for r in results:
+                com = [x for x in r.get("instruments", []) if any(norm(x) == n or n in norm(x) for n in ref)]
+                if len(com) >= need:
+                    r["why"] += ", instruments communs : " + ", ".join(com)
+                    kept.append(r)
+            results = kept
+        elif same:
+            notice = "Filtre ignoré : les instruments de ta chanson n'ont pas pu être identifiés."
+    elif same:
+        notice = "Filtre instruments ignoré : " + err
+    return jsonify(seed=seed_card, results=results[:8], notice=notice, filtered=bool(same and info))
 
 
  
@@ -286,11 +317,6 @@ def analyze_api():
     return jsonify(out)
 
 
-@app.route("/api/describe")
-def describe_api():
-    return jsonify(describe(request.args.get("title", "")[:150], request.args.get("artist", "")[:100]))
-
-
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
@@ -298,4 +324,3 @@ def index():
 
 if __name__ == "__main__":
     app.run(port=int(os.environ.get("PORT", 5000)), debug=True)
-    
