@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -30,22 +31,39 @@ MIN = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34
 
 
 # ---------- Deezer ----------
-@lru_cache(maxsize=1024)
+_cache = {}
+
+
+def deezer_get(url, params=None):
+    """Appelle Deezer avec nouvel essai si la limite de requêtes est atteinte."""
+    for i in range(3):
+        try:
+            d = HTTP.get(url, params=params, timeout=10).json()
+        except Exception:
+            d = {"error": "reseau"}
+        if "error" not in d:
+            return d
+        print("DEEZER ERREUR:", d["error"], flush=True)
+        time.sleep(1 + i)
+    return None
+
+
 def deezer_find(query):
-    try:
-        data = HTTP.get("https://api.deezer.com/search", params={"q": query, "limit": 1}, timeout=10).json()
-        return (data.get("data") or [None])[0]
-    except Exception:
-        return None
+    if query in _cache:
+        return _cache[query]
+    d = deezer_get("https://api.deezer.com/search", {"q": query, "limit": 1})
+    t = ((d or {}).get("data") or [None])[0]
+    if t:
+        _cache[query] = t
+    return t
 
 
-@lru_cache(maxsize=1024)
 def deezer_genre(album_id):
-    try:
-        album = HTTP.get(f"https://api.deezer.com/album/{album_id}", timeout=10).json()
-        return (album.get("genres", {}).get("data") or [{}])[0].get("name", "")
-    except Exception:
-        return ""
+    key = f"album:{album_id}"
+    if key not in _cache:
+        d = deezer_get(f"https://api.deezer.com/album/{album_id}") or {}
+        _cache[key] = (d.get("genres", {}).get("data") or [{}])[0].get("name", "")
+    return _cache[key]
 
 
 # ---------- Analyse audio ----------
@@ -55,8 +73,12 @@ def analyze(preview_url):
     try:
         import librosa
 
+        import miniaudio
+
         audio = HTTP.get(preview_url, timeout=15).content
-        y, sr = librosa.load(io.BytesIO(audio), sr=22050, mono=True, duration=30)
+        dec = miniaudio.decode(audio, output_format=miniaudio.SampleFormat.SIGNED16, nchannels=1, sample_rate=22050)
+        y = np.array(dec.samples, dtype=np.float32) / 32768.0
+        sr = 22050
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
         bpm = float(np.atleast_1d(tempo)[0])
         chroma = librosa.feature.chroma_stft(y=y, sr=sr).mean(axis=1)
@@ -214,8 +236,9 @@ def similar():
         res["score"], res["why"] = round(score * 100), ", ".join(why)
         return res
 
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         results = [r for r in pool.map(process, cands) if r]
+    print(f"CANDIDATS: {len(cands)} -> VERIFIES: {len(results)}", flush=True)
     results.sort(key=lambda r: -r["score"])
     return jsonify(seed=seed_card, results=results[:8])
 
