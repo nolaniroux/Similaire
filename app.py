@@ -23,7 +23,8 @@ from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__, static_folder="static")
 LASTFM_KEY = os.environ.get("LASTFM_API_KEY", "")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
 HTTP = requests.Session()
 HTTP.headers["User-Agent"] = "Similaire/1.0"
 
@@ -165,22 +166,35 @@ def get_candidates(seed):
 
 
 # ---------- Claude (optionnel) : accords et instruments ----------
-@lru_cache(maxsize=256)
+_desc_cache = {}
+
+
 def describe(title, artist):
-    if not ANTHROPIC_KEY:
+    """Accords et instruments estimés par Gemini (optionnel)."""
+    if not GEMINI_KEY:
         return {}
+    key = (title, artist)
+    if key in _desc_cache:
+        return _desc_cache[key]
     try:
         r = HTTP.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01"},
-            json={"model": "claude-sonnet-5-5", "max_tokens": 400, "messages": [{"role": "user", "content":
-                  f'Chanson : "{title}" de {artist}. Réponds uniquement en JSON : '
-                  '{"accords":"progression typique","instruments":["..."]}'}]},
-            timeout=30,
+            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+            headers={"x-goog-api-key": GEMINI_KEY},
+            json={
+                "contents": [{"parts": [{"text":
+                    f'Chanson : "{title}" de {artist}. Donne en français la progression d\'accords typique '
+                    'et les instruments principaux. Réponds avec ce JSON : '
+                    '{"accords":"...","instruments":["..."]}'}]}],
+                "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
+            },
+            timeout=40,
         ).json()
-        text = r["content"][0]["text"]
-        return json.loads(text[text.index("{"): text.rindex("}") + 1])
+        text = r["candidates"][0]["content"]["parts"][0]["text"]
+        out = json.loads(text[text.index("{"): text.rindex("}") + 1])
+        _desc_cache[key] = out
+        return out
     except Exception:
+        print("IA ECHEC:", traceback.format_exc(), flush=True)
         return {}
 
 
@@ -272,6 +286,11 @@ def analyze_api():
     return jsonify(out)
 
 
+@app.route("/api/describe")
+def describe_api():
+    return jsonify(describe(request.args.get("title", "")[:150], request.args.get("artist", "")[:100]))
+
+
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
@@ -279,3 +298,4 @@ def index():
 
 if __name__ == "__main__":
     app.run(port=int(os.environ.get("PORT", 5000)), debug=True)
+    
