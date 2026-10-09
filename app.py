@@ -10,7 +10,9 @@ import json
 import math
 import os
 import re
+import threading
 import time
+from urllib.parse import urlparse
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -208,6 +210,7 @@ def similar():
     seed_card.update(extra)
     if seed_an:
         seed_card["bpm"], seed_card["key"] = seed_an[0], key_name(seed_an[1], seed_an[2])
+        seed_card["pc"], seed_card["mode"] = seed_an[1], seed_an[2]
 
     seen = {seed["artist"]["name"].lower()}
     cands = []
@@ -220,7 +223,7 @@ def similar():
             break
 
     def process(c):
-        art, name = c["artist"]["name"], c["name"]
+        art, name = c["artist"]["name"], clean_title(c["name"])
         t = deezer_find(f'artist:"{art}" track:"{name}"') or deezer_find(f"{art} {name}")
         if not t:
             print("NON TROUVE SUR DEEZER:", art, "-", name, flush=True)
@@ -230,16 +233,7 @@ def similar():
             print("ARTISTE DIFFERENT:", art, "vs", da, flush=True)
             return None  # non vérifié : on l'écarte
         res = card(t)
-        an = analyze(t["preview"]) if t.get("preview") else None
-        score, why = 0.6 * float(c.get("match", 0)), ["écoutes communes sur Last.fm"]
-        if an and seed_an:
-            ts, ks = tempo_sim(an[0], seed_an[0]), key_sim(an[1:], seed_an[1:])
-            score += 0.25 * ts + 0.15 * ks
-            res["bpm"], res["key"] = an[0], key_name(an[1], an[2])
-            if ts > 0.7: why.append(f"tempo proche ({an[0]} BPM)")
-            if ks > 0.7: why.append("tonalité compatible")
-        else:
-            score += 0.2
+        score, why = 0.9 * float(c.get("match", 0)), ["écoutes communes sur Last.fm"]
         if res["genre"] and res["genre"] == seed_card["genre"]:
             score += 0.05
             why.append(f"même genre ({res['genre']})")
@@ -251,6 +245,31 @@ def similar():
     print(f"CANDIDATS: {len(cands)} -> VERIFIES: {len(results)}", flush=True)
     results.sort(key=lambda r: -r["score"])
     return jsonify(seed=seed_card, results=results[:8])
+
+
+ 
+ANALYZE_LOCK = threading.Lock()
+
+
+@app.route("/api/analyze")
+def analyze_api():
+    """Analyse un extrait Deezer (appelé un par un par la page)."""
+    url = request.args.get("url", "")
+    host = urlparse(url).hostname or ""
+    if not url.startswith("https://") or not host.endswith(".dzcdn.net"):
+        return jsonify(error="url invalide"), 400
+    with ANALYZE_LOCK:  # une seule analyse à la fois (mémoire)
+        an = analyze(url)
+    if not an:
+        return jsonify(error="analyse impossible")
+    out = {"bpm": an[0], "key": key_name(an[1], an[2])}
+    try:
+        seed = (int(request.args["pc"]), request.args["mode"])
+        out["tempo_sim"] = round(tempo_sim(an[0], float(request.args["bpm"])), 2)
+        out["key_sim"] = round(key_sim(an[1:], seed), 2)
+    except (KeyError, ValueError):
+        pass
+    return jsonify(out)
 
 
 @app.route("/")
