@@ -55,6 +55,7 @@ async function run(){
       +'<div class="k">'+esc(meta(s))+'</div>'+(s.accords?'<div class="k">Accords : '+esc(s.accords)+'</div>':'')+chips(s.instruments)
       +(s.preview?'<audio controls preload="none" src="'+esc(s.preview)+'"></audio>':'')+'</div></div></div>'
       +'<div class="card"><h2>Chansons similaires</h2>';
+    if(!d.results.length)h+='<p class="msg">Aucune chanson similaire trouvée. Essaie « titre artiste ».</p>';
     d.results.forEach(t=>{
       h+='<div class="rec"><div class="row"><img src="'+esc(t.cover)+'" alt=""><div style="flex:1"><b>'+esc(t.title)+'</b> — '+esc(t.artist)
         +'<div class="k">'+esc(meta(t))+'</div><p>Pourquoi : '+esc(t.why)+'</p>'
