@@ -23,6 +23,7 @@ from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__, static_folder="static")
 LASTFM_KEY = os.environ.get("LASTFM_API_KEY", "")
+DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN", "")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 HTTP = requests.Session()
@@ -35,6 +36,7 @@ MIN = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34
 
 # ---------- Deezer ----------
 _cache = {}
+_disc = {}
 
 
 def deezer_get(url, params=None):
@@ -192,6 +194,109 @@ def get_candidates(seed, niche=0):
         return [r for r in pool.map(top, arts) if r]
 
 
+# ---------- MusicBrainz + ListenBrainz (artistes similaires, filtre de popularité) ----------
+def mb_artist_id(name):
+    key = "mb:" + name
+    if key in _cache:
+        return _cache[key]
+    try:
+        r = HTTP.get("https://musicbrainz.org/ws/2/artist/",
+                     params={"query": f'artist:"{name}"', "fmt": "json", "limit": 1}, timeout=10).json()
+        a = (r.get("artists") or [None])[0]
+        if a and int(a.get("score", 0)) >= 80:
+            _cache[key] = a["id"]
+            return a["id"]
+    except Exception:
+        print("MUSICBRAINZ ECHEC:", traceback.format_exc(), flush=True)
+    return None
+
+
+def lb_similar(artist, niche):
+    """Artistes similaires selon ListenBrainz ; le mode niche demande des enregistrements moins populaires."""
+    mbid = mb_artist_id(artist)
+    if not mbid:
+        print("LISTENBRAINZ : artiste introuvable sur MusicBrainz:", artist, flush=True)
+        return []
+    mode, lo, hi = [("easy", 0, 100), ("medium", 0, 60), ("hard", 0, 35)][niche]
+    try:
+        r = HTTP.get(f"https://api.listenbrainz.org/1/lb-radio/artist/{mbid}",
+                     params={"mode": mode, "max_similar_artists": 30, "max_recordings_per_artist": 2,
+                             "pop_begin": lo, "pop_end": hi}, timeout=25).json()
+    except Exception:
+        print("LISTENBRAINZ ECHEC:", traceback.format_exc(), flush=True)
+        return []
+    items = []
+
+    def walk(x):  # la réponse est un dict {artiste: [enregistrements]} : on la parcourt sans supposer la forme exacte
+        if isinstance(x, list):
+            for i in x:
+                if isinstance(i, dict) and "recording_mbid" in i:
+                    items.append(i)
+                else:
+                    walk(i)
+        elif isinstance(x, dict):
+            for k, v in x.items():
+                if k != mbid:
+                    walk(v)
+
+    walk(r)
+    firsts, seen = [], set()
+    for i in items:
+        k = norm(i.get("similar_artist_name", ""))
+        if k and k not in seen and i.get("similar_artist_mbid") != mbid:
+            seen.add(k)
+            firsts.append(i)
+    names = {}
+    try:  # noms des morceaux (si l'API ne les donne pas, on prendra le titre phare de l'artiste sur Deezer)
+        m = HTTP.post("https://api.listenbrainz.org/1/metadata/recording/",
+                      json={"recording_mbids": [i["recording_mbid"] for i in firsts], "inc": "artist"}, timeout=25).json()
+        for k, v in m.items():
+            names[k] = ((v or {}).get("recording") or {}).get("name") or ""
+    except Exception:
+        print("LISTENBRAINZ METADATA ECHEC", flush=True)
+    n = len(firsts)
+    print(f"LISTENBRAINZ: {n} artistes similaires (mode {mode})", flush=True)
+    return [{"name": names.get(i["recording_mbid"], ""), "artist": {"name": i.get("similar_artist_name", "")},
+             "match": round(0.8 - 0.5 * idx / max(1, n - 1), 3), "playcount": 0}
+            for idx, i in enumerate(firsts)]
+
+
+def fetch_pools(seed, niche):
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f1 = ex.submit(get_candidates, seed, niche)
+        f2 = ex.submit(lb_similar, seed["artist"]["name"], niche)
+        return f1.result(), f2.result()
+
+
+def merge_candidates(lfm, lb):
+    """Fusionne Last.fm et ListenBrainz : un artiste proposé par les deux sources remonte."""
+    by = {}
+    for c in lfm:
+        c["src"] = ["Last.fm"]
+        by[norm(c["artist"]["name"])] = c
+    for c in lb:
+        k = norm(c["artist"]["name"])
+        if not k:
+            continue
+        if k in by:
+            by[k]["src"].append("ListenBrainz")
+            by[k]["match"] = min(1.0, float(by[k].get("match", 0)) + 0.15)
+        else:
+            c["src"] = ["ListenBrainz"]
+            by[k] = c
+    return sorted(by.values(), key=lambda c: -float(c.get("match", 0)))
+
+
+def deezer_top(artist):
+    """Morceau le plus connu d'un artiste sur Deezer."""
+    d = deezer_get("https://api.deezer.com/search/artist", {"q": artist, "limit": 1})
+    a = ((d or {}).get("data") or [None])[0]
+    if not a or norm(a["name"]) != norm(artist):
+        return None
+    t = deezer_get(f"https://api.deezer.com/artist/{a['id']}/top", {"limit": 1})
+    return ((t or {}).get("data") or [None])[0]
+
+
 # ---------- Claude (optionnel) : accords et instruments ----------
 INSTRUMENTS = ["guitare", "piano", "batterie", "basse", "synthétiseur", "violon",
                "saxophone", "trompette", "flûte", "orgue", "percussions", "voix"]
@@ -268,7 +373,7 @@ def similar():
 
     seen = {seed["artist"]["name"].lower()}
     cands = []
-    for c in rank_pool(get_candidates(seed, niche), niche):
+    for c in rank_pool(merge_candidates(*fetch_pools(seed, niche)), niche):
         a = c["artist"]["name"]
         if a.lower() not in seen:  # un seul titre par artiste
             seen.add(a.lower())
@@ -277,8 +382,11 @@ def similar():
             break
 
     def process(c):
-        art, name = c["artist"]["name"], clean_title(c["name"])
-        t = deezer_find(f'artist:"{art}" track:"{name}"') or deezer_find(f"{art} {name}")
+        art, name = c["artist"]["name"], clean_title(c.get("name") or "")
+        src = c.get("src", [])
+        t = (deezer_find(f'artist:"{art}" track:"{name}"') or deezer_find(f"{art} {name}")) if name else None
+        if not t and "ListenBrainz" in src:
+            t = deezer_top(art)  # pas de titre connu : on prend son morceau le plus connu
         if not t:
             print("NON TROUVE SUR DEEZER:", art, "-", name, flush=True)
             return None
@@ -288,7 +396,15 @@ def similar():
             return None  # non vérifié : on l'écarte
         res = card(t)
         score = max(0.05, 0.9 * float(c.get("match", 0)) - 0.05 * niche * popularity(c))
-        why = ["écoutes communes sur Last.fm"]
+        why = []
+        if "Last.fm" in src:
+            why.append("écoutes communes (Last.fm)")
+        if "ListenBrainz" in src:
+            why.append("artiste similaire (ListenBrainz)")
+        if len(src) > 1:
+            score += 0.08
+            why.append("confirmée par 2 sources")
+        res["sources"] = src
         plays = int(c.get("playcount") or 0)
         res["plays"] = plays
         if niche and 0 < plays < 500000:
@@ -350,6 +466,37 @@ def analyze_api():
     except (KeyError, ValueError):
         pass
     return jsonify(out)
+
+
+@app.route("/api/discogs")
+def discogs_api():
+    """Styles, année et nombre de collectionneurs d'un morceau d'après Discogs (appelé par la page)."""
+    if not DISCOGS_TOKEN:
+        return jsonify(error="DISCOGS_TOKEN non configuré")
+    artist = request.args.get("artist", "")[:100]
+    title = clean_title(request.args.get("title", ""))[:150]
+    key = (artist, title)
+    if key in _disc:
+        return jsonify(_disc[key])
+    try:
+        r = HTTP.get("https://api.discogs.com/database/search",
+                     params={"artist": artist, "track": title, "type": "release", "per_page": 5},
+                     headers={"Authorization": f"Discogs token={DISCOGS_TOKEN}"}, timeout=15).json()
+        res = r.get("results") or []
+        if not res:
+            return jsonify(error="introuvable sur Discogs")
+        styles, genres = [], []
+        for x in res[:3]:
+            styles += x.get("style", []) or []
+            genres += x.get("genre", []) or []
+        uniq = lambda a: list(dict.fromkeys(a))
+        out = {"styles": uniq(styles)[:6], "genres": uniq(genres)[:3], "year": res[0].get("year"),
+               "have": (res[0].get("community") or {}).get("have", 0)}
+        _disc[key] = out
+        return jsonify(out)
+    except Exception:
+        print("DISCOGS ECHEC:", traceback.format_exc(), flush=True)
+        return jsonify(error="erreur Discogs")
 
 
 @app.route("/")
