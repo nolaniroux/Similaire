@@ -40,14 +40,19 @@ input[type=checkbox]{flex:none;width:18px;height:18px;padding:0;accent-color:var
 <h1>Simil<span>aire</span></h1>
 <p class="sub">Entre une chanson que tu aimes : on trouve des titres réels qui lui ressemblent (tempo, tonalité, genre, écoutes communes).</p>
 <div class="search"><input id="q" placeholder="Ex : Get Lucky Daft Punk" autocomplete="off"><button id="go">Trouver</button></div>
-<label class="filters"><input type="checkbox" id="sim"> Instruments similaires : ne garder que les chansons qui utilisent les mêmes instruments</label>
+<div class="filters"><span>Popularité :</span><span class="chips" id="nc"></span></div>
 <div id="out"></div>
 </main>
 <script>
 const $=id=>document.getElementById(id),out=$('out');
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const chips=a=>'<div class="chips">'+(a||[]).map(x=>'<span class="chip">'+esc(x)+'</span>').join('')+'</div>';
-const meta=t=>[t.genre,t.bpm&&t.bpm+' BPM',t.key].filter(Boolean).join(' · ');
+const fmt=n=>n>=1e6?(n/1e6).toFixed(1)+' M':n>=1e3?Math.round(n/1e3)+' k':String(n);
+const pl=t=>t.plays?fmt(t.plays)+' écoutes':'';
+const meta=t=>[t.genre,t.bpm&&t.bpm+' BPM',t.key,pl(t)].filter(Boolean).join(' · ');
+let NICHE=0;
+$('nc').innerHTML=['Populaires','Découverte','Très niche'].map((x,i)=>'<span class="chip fc'+(i?'':' on')+'" data-v="'+i+'">'+x+'</span>').join('');
+$('nc').onclick=e=>{const c=e.target.closest('.fc');if(!c)return;NICHE=+c.dataset.v;document.querySelectorAll('#nc .fc').forEach(x=>x.classList.toggle('on',x===c))};
 const links=t=>{const q=encodeURIComponent(t.title+' '+t.artist);return '<a href="https://open.spotify.com/search/'+q+'" target="_blank" rel="noopener">Spotify</a><a href="https://music.youtube.com/search?q='+q+'" target="_blank" rel="noopener">YouTube Music</a>'};
 let RUN=0;
 async function run(){
@@ -55,23 +60,29 @@ async function run(){
   const q=$('q').value.trim();if(!q)return;
   $('go').disabled=true;out.innerHTML='<p class="msg">Analyse en cours… (10 à 40 secondes)</p>';
   try{
-    const r=await fetch('/api/similar?q='+encodeURIComponent(q)+($('sim').checked?'&sim=1':''));
+    const r=await fetch('/api/similar?q='+encodeURIComponent(q)+'&niche='+NICHE);
     const d=await r.json();
     if(!r.ok)throw new Error(d.error||'Erreur');
     const s=d.seed;
     let h='<div class="card"><h2>Ta chanson</h2><div class="row"><img src="'+esc(s.cover)+'" alt=""><div><b>'+esc(s.title)+'</b> — '+esc(s.artist)
       +'<div class="k">'+esc(meta(s))+'</div>'+(s.accords?'<div class="k">Accords : '+esc(s.accords)+'</div>':'')+chips(s.instruments)
       +(s.preview?'<audio controls preload="none" src="'+esc(s.preview)+'"></audio>':'')+'</div></div></div>'
-      +'<div class="card"><h2>Chansons similaires</h2>'+(d.notice?'<p class="k">'+esc(d.notice)+'</p>':'')+'<div id="list">';
-    if(!d.results.length)h+='<p class="msg">'+(d.filtered?'Aucune chanson avec les mêmes instruments. Décoche le filtre pour voir toutes les chansons.':'Aucune chanson similaire trouvée. Essaie « titre artiste ».')+'</p>';
-    d.results.forEach((t,i)=>{
-      h+='<div class="rec" id="r'+i+'" data-s="'+t.score+'"><div class="row"><img src="'+esc(t.cover)+'" alt=""><div style="flex:1"><b>'+esc(t.title)+'</b> — '+esc(t.artist)
-        +'<div class="k" id="m'+i+'">'+esc(meta(t))+(t.preview?' · analyse du tempo…':'')+'</div><p>Pourquoi : <span id="w'+i+'">'+esc(t.why)+'</span></p>'
-        +(t.preview?'<audio controls preload="none" src="'+esc(t.preview)+'"></audio>':'')
-        +chips(t.instruments)+(t.accords?'<div class="k">Accords : '+esc(t.accords)+'</div>':'')
-        +''+links(t)+'</div><div class="score" id="s'+i+'">'+t.score+'%</div></div></div>';
-    });
-    out.innerHTML=h+'</div></div>';
+;
+    const rec=(t,i)=>'<div class="rec" id="r'+i+'" data-s="'+t.score+'"><div class="row"><img src="'+esc(t.cover)+'" alt=""><div style="flex:1"><b>'+esc(t.title)+'</b> — '+esc(t.artist)
+      +'<div class="k" id="m'+i+'">'+esc(meta(t))+(t.preview?' · analyse du tempo…':'')+'</div><p>Pourquoi : <span id="w'+i+'">'+esc(t.why)+'</span></p>'
+      +(t.preview?'<audio controls preload="none" src="'+esc(t.preview)+'"></audio>':'')
+      +chips(t.instruments)+(t.accords?'<div class="k">Accords : '+esc(t.accords)+'</div>':'')
+      +links(t)+'</div><div class="score" id="s'+i+'">'+t.score+'%</div></div></div>';
+    const sec=(title,arr)=>arr.length?'<div class="card"><h2>'+title+'</h2><div>'+arr.map(([t,i])=>rec(t,i)).join('')+'</div></div>':'';
+    const idx=d.results.map((t,i)=>[t,i]);
+    if(d.notice)h+='<p class="msg">'+esc(d.notice)+'</p>';
+    if(!idx.length)h+=sec('Chansons similaires',[])+'<div class="card"><p class="msg">Aucune chanson similaire trouvée. Essaie « titre artiste ».</p></div>';
+    else if(d.grouped){
+      const a=idx.filter(([t])=>t.same),b=idx.filter(([t])=>!t.same);
+      h+=a.length?sec('Avec les mêmes instruments',a):'<div class="card"><h2>Avec les mêmes instruments</h2><p class="msg">Aucune chanson trouvée avec les mêmes instruments.</p></div>';
+      h+=sec('Similaires, mais avec d’autres instruments',b);
+    }else h+=sec('Chansons similaires',idx);
+    out.innerHTML=h;
     enrich(s,d.results,my);
   }catch(e){out.innerHTML='<p class="msg">'+esc(e.message)+'</p>'}
   $('go').disabled=false;
@@ -86,15 +97,14 @@ async function enrich(s,rs,my){
       const a=await r.json();
       if(my!==RUN)return;
       if(!r.ok||a.error){m.textContent=meta(t);continue}
-      m.textContent=[t.genre,a.bpm+' BPM',a.key].filter(Boolean).join(' · ');
+      m.textContent=[t.genre,a.bpm+' BPM',a.key,pl(t)].filter(Boolean).join(' · ');
       const x=[];
       if(a.tempo_sim!=null){
-        const ra=a.bpm/s.bpm,dbl=ra>1.7||ra<0.6;
-        x.push(a.tempo_sim>0.7?(dbl?'même pulsation, tempo ×2 ou ÷2':'tempo proche')+' ('+a.bpm+' vs '+s.bpm+' BPM)':'tempo différent ('+a.bpm+' vs '+s.bpm+' BPM)');
+        x.push(a.tempo_sim>0.7?'tempo proche ('+a.bpm+' vs '+s.bpm+' BPM)':'tempo différent ('+a.bpm+' vs '+s.bpm+' BPM)');
         x.push(a.key_sim>0.7?'tonalité compatible':'tonalité éloignée');
         const f=Math.round(0.5*t.score+30*a.tempo_sim+20*a.key_sim);
         $('r'+i).dataset.s=f;$('s'+i).textContent=f+'%';
-        const L=$('list');[...L.children].sort((p,q)=>q.dataset.s-p.dataset.s).forEach(e=>L.appendChild(e));
+        const L=$('r'+i).parentNode;[...L.children].sort((p,q)=>q.dataset.s-p.dataset.s).forEach(e=>L.appendChild(e));
       }
       if(x.length)$('w'+i).textContent=t.why+', '+x.join(', ');
     }catch(e){m.textContent=meta(t)}
