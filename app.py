@@ -95,6 +95,10 @@ def analyze(preview_url):
         return None
 
 
+def norm(x):
+    return re.sub(r"[^a-z0-9]", "", x.lower())
+
+
 def key_name(pc, mode):
     return f"{NOTES[pc]} {'majeur' if mode == 'maj' else 'mineur'}"
 
@@ -216,9 +220,15 @@ def similar():
             break
 
     def process(c):
-        t = deezer_find(f'artist:"{c["artist"]["name"]}" track:"{c["name"]}"')
-        if not t or c["artist"]["name"].lower() not in t["artist"]["name"].lower():
-            return None  # non vérifié sur Deezer : on l'écarte
+        art, name = c["artist"]["name"], c["name"]
+        t = deezer_find(f'artist:"{art}" track:"{name}"') or deezer_find(f"{art} {name}")
+        if not t:
+            print("NON TROUVE SUR DEEZER:", art, "-", name, flush=True)
+            return None
+        da = t["artist"]["name"]
+        if norm(art) not in norm(da) and norm(da) not in norm(art):
+            print("ARTISTE DIFFERENT:", art, "vs", da, flush=True)
+            return None  # non vérifié : on l'écarte
         res = card(t)
         an = analyze(t["preview"]) if t.get("preview") else None
         score, why = 0.6 * float(c.get("match", 0)), ["écoutes communes sur Last.fm"]
