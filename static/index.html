@@ -25,10 +25,13 @@ button:disabled{opacity:.6}
 .chip{background:var(--chip);border-radius:99px;padding:3px 10px;font-size:.82rem}
 .rec{padding:14px 0;border-top:1px solid var(--line)}.rec:first-of-type{border-top:0}
 .rec p{margin:4px 0 6px;color:var(--mute);font-size:.9rem}
-.rec a{color:var(--accent);font-weight:600;text-decoration:none;font-size:.88rem}
+.rec a{margin-right:16px;color:var(--accent);font-weight:600;text-decoration:none;font-size:.88rem}
 .score{margin-left:auto;font-weight:700;color:var(--accent)}
 audio{width:100%;height:32px;margin-top:6px}
 .mini{padding:6px 12px;font-size:.8rem;margin:6px 8px 0 0;background:var(--chip);color:var(--ink)}
+.fc{cursor:pointer;border:1px solid var(--line)}.fc.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.filters{display:flex;gap:8px;align-items:center;margin-top:14px;font-size:.9rem;color:var(--mute);cursor:pointer}
+input[type=checkbox]{flex:none;width:18px;height:18px;padding:0;accent-color:var(--accent)}
 .msg{margin-top:20px;color:var(--mute)}
 </style>
 </head>
@@ -37,6 +40,7 @@ audio{width:100%;height:32px;margin-top:6px}
 <h1>Simil<span>aire</span></h1>
 <p class="sub">Entre une chanson que tu aimes : on trouve des titres réels qui lui ressemblent (tempo, tonalité, genre, écoutes communes).</p>
 <div class="search"><input id="q" placeholder="Ex : Get Lucky Daft Punk" autocomplete="off"><button id="go">Trouver</button></div>
+<label class="filters"><input type="checkbox" id="sim"> Instruments similaires : ne garder que les chansons qui utilisent les mêmes instruments</label>
 <div id="out"></div>
 </main>
 <script>
@@ -44,58 +48,55 @@ const $=id=>document.getElementById(id),out=$('out');
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const chips=a=>'<div class="chips">'+(a||[]).map(x=>'<span class="chip">'+esc(x)+'</span>').join('')+'</div>';
 const meta=t=>[t.genre,t.bpm&&t.bpm+' BPM',t.key].filter(Boolean).join(' · ');
+const links=t=>{const q=encodeURIComponent(t.title+' '+t.artist);return '<a href="https://open.spotify.com/search/'+q+'" target="_blank" rel="noopener">Spotify</a><a href="https://music.youtube.com/search?q='+q+'" target="_blank" rel="noopener">YouTube Music</a>'};
+let RUN=0;
 async function run(){
+  const my=++RUN;
   const q=$('q').value.trim();if(!q)return;
-  $('go').disabled=true;out.innerHTML='<p class="msg">Analyse en cours… (10 à 30 secondes)</p>';
+  $('go').disabled=true;out.innerHTML='<p class="msg">Analyse en cours… (10 à 40 secondes)</p>';
   try{
-    const r=await fetch('/api/similar?q='+encodeURIComponent(q));
+    const r=await fetch('/api/similar?q='+encodeURIComponent(q)+($('sim').checked?'&sim=1':''));
     const d=await r.json();
     if(!r.ok)throw new Error(d.error||'Erreur');
-    const s=d.seed;window.R=d.results;
+    const s=d.seed;
     let h='<div class="card"><h2>Ta chanson</h2><div class="row"><img src="'+esc(s.cover)+'" alt=""><div><b>'+esc(s.title)+'</b> — '+esc(s.artist)
       +'<div class="k">'+esc(meta(s))+'</div>'+(s.accords?'<div class="k">Accords : '+esc(s.accords)+'</div>':'')+chips(s.instruments)
       +(s.preview?'<audio controls preload="none" src="'+esc(s.preview)+'"></audio>':'')+'</div></div></div>'
-      +'<div class="card"><h2>Chansons similaires</h2><div id="list">';
-    if(!d.results.length)h+='<p class="msg">Aucune chanson similaire trouvée. Essaie « titre artiste ».</p>';
+      +'<div class="card"><h2>Chansons similaires</h2>'+(d.notice?'<p class="k">'+esc(d.notice)+'</p>':'')+'<div id="list">';
+    if(!d.results.length)h+='<p class="msg">'+(d.filtered?'Aucune chanson avec les mêmes instruments. Décoche le filtre pour voir toutes les chansons.':'Aucune chanson similaire trouvée. Essaie « titre artiste ».')+'</p>';
     d.results.forEach((t,i)=>{
       h+='<div class="rec" id="r'+i+'" data-s="'+t.score+'"><div class="row"><img src="'+esc(t.cover)+'" alt=""><div style="flex:1"><b>'+esc(t.title)+'</b> — '+esc(t.artist)
         +'<div class="k" id="m'+i+'">'+esc(meta(t))+(t.preview?' · analyse du tempo…':'')+'</div><p>Pourquoi : <span id="w'+i+'">'+esc(t.why)+'</span></p>'
         +(t.preview?'<audio controls preload="none" src="'+esc(t.preview)+'"></audio>':'')
-        +'<div id="x'+i+'"></div><button class="mini" id="d'+i+'" onclick="desc('+i+')">Accords &amp; instruments</button> '
-        +'<a href="'+esc(t.link)+'" target="_blank" rel="noopener">Écouter en entier sur Deezer</a></div><div class="score" id="s'+i+'">'+t.score+'%</div></div></div>';
+        +chips(t.instruments)+(t.accords?'<div class="k">Accords : '+esc(t.accords)+'</div>':'')
+        +''+links(t)+'</div><div class="score" id="s'+i+'">'+t.score+'%</div></div></div>';
     });
     out.innerHTML=h+'</div></div>';
-    enrich(s,d.results);
+    enrich(s,d.results,my);
   }catch(e){out.innerHTML='<p class="msg">'+esc(e.message)+'</p>'}
   $('go').disabled=false;
 }
-async function desc(i){
-  const t=window.R[i],b=$('d'+i);b.disabled=true;b.textContent='…';
-  try{
-    const r=await fetch('/api/describe?title='+encodeURIComponent(t.title)+'&artist='+encodeURIComponent(t.artist));
-    const a=await r.json();
-    $('x'+i).innerHTML=(a.accords||a.instruments)?(a.accords?'<div class="k">Accords : '+esc(a.accords)+'</div>':'')+chips(a.instruments):'<div class="k">Indisponible pour le moment.</div>';
-    b.remove();
-  }catch(e){b.disabled=false;b.textContent='Réessayer'}
-}
-async function enrich(s,rs){
+async function enrich(s,rs,my){
   for(let i=0;i<rs.length;i++){
+    if(my!==RUN)return;
     const t=rs[i],m=$('m'+i);if(!m)return;
     if(!t.preview)continue;
     try{
       const r=await fetch('/api/analyze?url='+encodeURIComponent(t.preview)+(s.bpm?'&bpm='+s.bpm+'&pc='+s.pc+'&mode='+s.mode:''));
       const a=await r.json();
+      if(my!==RUN)return;
       if(!r.ok||a.error){m.textContent=meta(t);continue}
       m.textContent=[t.genre,a.bpm+' BPM',a.key].filter(Boolean).join(' · ');
       const x=[];
       if(a.tempo_sim!=null){
-        x.push(a.tempo_sim>0.7?'tempo proche ('+a.bpm+' vs '+s.bpm+' BPM)':'tempo différent ('+a.bpm+' vs '+s.bpm+' BPM)');
+        const ra=a.bpm/s.bpm,dbl=ra>1.7||ra<0.6;
+        x.push(a.tempo_sim>0.7?(dbl?'même pulsation, tempo ×2 ou ÷2':'tempo proche')+' ('+a.bpm+' vs '+s.bpm+' BPM)':'tempo différent ('+a.bpm+' vs '+s.bpm+' BPM)');
         x.push(a.key_sim>0.7?'tonalité compatible':'tonalité éloignée');
         const f=Math.round(0.5*t.score+30*a.tempo_sim+20*a.key_sim);
         $('r'+i).dataset.s=f;$('s'+i).textContent=f+'%';
         const L=$('list');[...L.children].sort((p,q)=>q.dataset.s-p.dataset.s).forEach(e=>L.appendChild(e));
       }
-      if(x.length)$('w'+i).textContent+=', '+x.join(', ');
+      if(x.length)$('w'+i).textContent=t.why+', '+x.join(', ');
     }catch(e){m.textContent=meta(t)}
   }
 }
