@@ -32,6 +32,10 @@ audio{width:100%;height:32px;margin-top:6px}
 .fc{cursor:pointer;border:1px solid var(--line)}.fc.on{background:var(--accent);color:#fff;border-color:var(--accent)}
 .filters{display:flex;gap:8px;align-items:center;margin-top:14px;font-size:.9rem;color:var(--mute);cursor:pointer}
 input[type=checkbox]{flex:none;width:18px;height:18px;padding:0;accent-color:var(--accent)}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 4px}.tags:empty{display:none}
+.tag{font-size:.74rem;padding:2px 9px;border-radius:99px;background:var(--chip);color:var(--mute)}
+.tag.ok{background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)}
+details{margin-top:8px}summary{cursor:pointer;color:var(--mute);font-size:.82rem}details .chips{margin:8px 0 4px}
 .msg{margin-top:20px;color:var(--mute)}
 </style>
 </head>
@@ -53,6 +57,7 @@ const meta=t=>[t.genre,t.bpm&&t.bpm+' BPM',t.key,pl(t)].filter(Boolean).join(' �
 let NICHE=0;
 $('nc').innerHTML=['Populaires','Découverte','Très niche'].map((x,i)=>'<span class="chip fc'+(i?'':' on')+'" data-v="'+i+'">'+x+'</span>').join('');
 $('nc').onclick=e=>{const c=e.target.closest('.fc');if(!c)return;NICHE=+c.dataset.v;document.querySelectorAll('#nc .fc').forEach(x=>x.classList.toggle('on',x===c))};
+const tag=(x,c)=>'<span class="tag'+(c?' '+c:'')+'">'+esc(x)+'</span>';
 const links=t=>{const q=encodeURIComponent(t.title+' '+t.artist);return '<a href="https://open.spotify.com/search/'+q+'" target="_blank" rel="noopener">Spotify</a><a href="https://music.youtube.com/search?q='+q+'" target="_blank" rel="noopener">YouTube Music</a>'};
 let RUN=0;
 async function run(){
@@ -68,11 +73,16 @@ async function run(){
       +'<div class="k">'+esc(meta(s))+'</div><div class="k" id="dgs"></div>'+(s.accords?'<div class="k">Accords : '+esc(s.accords)+'</div>':'')+chips(s.instruments)
       +(s.preview?'<audio controls preload="none" src="'+esc(s.preview)+'"></audio>':'')+'</div></div></div>'
 ;
-    const rec=(t,i)=>'<div class="rec" id="r'+i+'" data-s="'+t.score+'"><div class="row"><img src="'+esc(t.cover)+'" alt=""><div style="flex:1"><b>'+esc(t.title)+'</b> — '+esc(t.artist)
-      +'<div class="k" id="m'+i+'">'+esc(meta(t))+(t.preview?' · analyse du tempo…':'')+'</div><p>Pourquoi : <span id="w'+i+'">'+esc(t.why)+'</span></p><div class="k" id="dg'+i+'"></div>'
+    const tags0=t=>((t.sources||[]).length>1?tag('2 sources','ok'):(t.sources||[]).length?tag(t.sources[0]):'')+(t.same?tag('mêmes instruments','ok'):'')+(t.plays>0&&t.plays<500000?tag('peu connue'):'');
+    const rec=(t,i)=>'<div class="rec" id="r'+i+'" data-s="'+t.score+'"><div class="row"><img src="'+esc(t.cover)+'" alt=""><div style="flex:1;min-width:0"><b>'+esc(t.title)+'</b> — '+esc(t.artist)
+      +'<div class="k" id="m'+i+'">'+esc(meta(t))+(t.preview?' · analyse…':'')+'</div>'
+      +'<div class="tags" id="tg'+i+'">'+tags0(t)+'</div>'
       +(t.preview?'<audio controls preload="none" src="'+esc(t.preview)+'"></audio>':'')
-      +chips(t.instruments)+(t.accords?'<div class="k">Accords : '+esc(t.accords)+'</div>':'')
-      +links(t)+'</div><div class="score" id="s'+i+'">'+t.score+'%</div></div></div>';
+      +'<div>'+links(t)+'</div>'
+      +'<details><summary>Détails</summary>'+chips(t.instruments)+(t.accords?'<div class="k">Accords : '+esc(t.accords)+'</div>':'')
+      +'<div class="k" id="td'+i+'"></div><div class="k" id="dg'+i+'"></div></details>'
+      +'</div><div class="score" id="s'+i+'">'+t.score+'%</div></div></div>';
+    
     const sec=(title,arr)=>arr.length?'<div class="card"><h2>'+title+'</h2><div>'+arr.map(([t,i])=>rec(t,i)).join('')+'</div></div>':'';
     const idx=d.results.map((t,i)=>[t,i]);
     if(d.notice)h+='<p class="msg">'+esc(d.notice)+'</p>';
@@ -108,13 +118,14 @@ async function enrich(s,rs,my){
     const pD=NOD?Promise.resolve(null):getD(t.artist,t.title);
     const [[ok,a],d]=await Promise.all([pA,pD]);
     if(my!==RUN)return;
-    const x=[],parts=[t.genre];let ts=null,ks=null,sr=null;
+    const tg=[],parts=[t.genre];let ts=null,ks=null,sr=null;
     if(ok&&!a.error){
       parts.push(a.bpm+' BPM',a.key);
       if(a.tempo_sim!=null){
         ts=a.tempo_sim;ks=a.key_sim;
-        x.push(ts>0.7?'tempo proche ('+a.bpm+' vs '+s.bpm+' BPM)':'tempo différent ('+a.bpm+' vs '+s.bpm+' BPM)');
-        x.push(ks>0.7?'tonalité compatible':'tonalité éloignée');
+        if(ts>0.7)tg.push(tag('tempo proche','ok'));
+        if(ks>0.7)tg.push(tag('tonalité compatible','ok'));
+        $('td'+i).textContent='Tempo : '+a.bpm+' BPM (le tien : '+s.bpm+') · tonalité : '+a.key+' (la tienne : '+s.key+')';
       }
     }
     parts.push(pl(t));
@@ -124,7 +135,7 @@ async function enrich(s,rs,my){
       if(sd&&sd.styles&&sd.styles.length){
         const low=sd.styles.map(z=>z.toLowerCase()),com=d.styles.filter(z=>low.includes(z.toLowerCase()));
         sr=Math.min(1,com.length/Math.max(1,Math.min(2,sd.styles.length)));
-        x.push(com.length?'styles Discogs communs : '+com.join(', '):'styles Discogs différents');
+        if(com.length)tg.push(tag('style : '+com.slice(0,2).join(', '),'ok'));
       }
     }
     let f=null;
@@ -135,7 +146,7 @@ async function enrich(s,rs,my){
       $('r'+i).dataset.s=f;$('s'+i).textContent=f+'%';
       const L=$('r'+i).parentNode;[...L.children].sort((p,q)=>q.dataset.s-p.dataset.s).forEach(e=>L.appendChild(e));
     }
-    if(x.length)$('w'+i).textContent=t.why+', '+x.join(', ');
+    if(tg.length)$('tg'+i).insertAdjacentHTML('beforeend',tg.join(''));
   }
 }
 $('go').onclick=run;$('q').addEventListener('keydown',e=>{if(e.key==='Enter')run()});
