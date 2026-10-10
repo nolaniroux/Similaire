@@ -257,7 +257,7 @@ def lb_similar(artist, niche):
     n = len(firsts)
     print(f"LISTENBRAINZ: {n} artistes similaires (mode {mode})", flush=True)
     return [{"name": names.get(i["recording_mbid"], ""), "artist": {"name": i.get("similar_artist_name", "")},
-             "match": round(0.8 - 0.5 * idx / max(1, n - 1), 3), "playcount": 0}
+             "match": round(0.45 - 0.3 * idx / max(1, n - 1), 3), "playcount": 0}
             for idx, i in enumerate(firsts)]
 
 
@@ -395,6 +395,9 @@ def similar():
             print("ARTISTE DIFFERENT:", art, "vs", da, flush=True)
             return None  # non vérifié : on l'écarte
         res = card(t)
+        if src == ["ListenBrainz"] and res["genre"] and seed_card["genre"] and res["genre"] != seed_card["genre"]:
+            print("LISTENBRAINZ ECARTE (genre different):", art, "-", res["genre"], flush=True)
+            return None  # une seule source et un autre genre : trop risqué
         score = max(0.05, 0.9 * float(c.get("match", 0)) - 0.05 * niche * popularity(c))
         why = []
         if "Last.fm" in src:
