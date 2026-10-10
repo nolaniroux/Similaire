@@ -70,16 +70,16 @@ async function run(){
     if(!r.ok)throw new Error(d.error||'Erreur');
     const s=d.seed;
     let h='<div class="card"><h2>Ta chanson</h2><div class="row"><img src="'+esc(s.cover)+'" alt=""><div><b>'+esc(s.title)+'</b> — '+esc(s.artist)
-      +'<div class="k">'+esc(meta(s))+'</div><div class="k" id="dgs"></div>'+(s.accords?'<div class="k">Accords : '+esc(s.accords)+'</div>':'')+chips(s.instruments)
+      +'<div class="k">'+esc(meta(s))+'</div><div class="k" id="dgs"></div>'+(s.genres&&s.genres.length?'<div class="k">Genres : '+esc(s.genres.join(', '))+'</div>':'')+(s.accords?'<div class="k">Accords : '+esc(s.accords)+'</div>':'')+chips(s.instruments)
       +(s.preview?'<audio controls preload="none" src="'+esc(s.preview)+'"></audio>':'')+'</div></div></div>'
 ;
-    const tags0=t=>((t.sources||[]).length>1?tag('2 sources','ok'):(t.sources||[]).length?tag(t.sources[0]):'')+(t.same?tag('mêmes instruments','ok'):'')+(t.plays>0&&t.plays<500000?tag('peu connue'):'');
+    const tags0=t=>((t.sources||[]).length>1?tag('2 sources','ok'):(t.sources||[]).length?tag(t.sources[0]):'')+(t.same_genre?tag('même genre','ok'):'')+(t.same?tag('mêmes instruments','ok'):'')+((t.rare||(t.plays>0&&t.plays<500000))?tag('peu connue'):'');
     const rec=(t,i)=>'<div class="rec" id="r'+i+'" data-s="'+t.score+'"><div class="row"><img src="'+esc(t.cover)+'" alt=""><div style="flex:1;min-width:0"><b>'+esc(t.title)+'</b> — '+esc(t.artist)
       +'<div class="k" id="m'+i+'">'+esc(meta(t))+(t.preview?' · analyse…':'')+'</div>'
       +'<div class="tags" id="tg'+i+'">'+tags0(t)+'</div>'
       +(t.preview?'<audio controls preload="none" src="'+esc(t.preview)+'"></audio>':'')
       +'<div>'+links(t)+'</div>'
-      +'<details><summary>Détails</summary>'+chips(t.instruments)+(t.accords?'<div class="k">Accords : '+esc(t.accords)+'</div>':'')
+      +'<details><summary>Détails</summary>'+(t.lb_users!=null?'<div class="k">ListenBrainz : '+fmt(t.lb_users)+' auditeurs</div>':'')+(t.genres&&t.genres.length?'<div class="k">Genres : '+esc(t.genres.join(', '))+'</div>':'')+chips(t.instruments)+(t.accords?'<div class="k">Accords : '+esc(t.accords)+'</div>':'')
       +'<div class="k" id="td'+i+'"></div><div class="k" id="dg'+i+'"></div></details>'
       +'</div><div class="score" id="s'+i+'">'+t.score+'%</div></div></div>';
     
@@ -141,8 +141,13 @@ async function enrich(s,rs,my){
     let f=null;
     if(ts!=null)f=sr!=null?0.45*t.score+25*ts+15*ks+15*sr:0.5*t.score+30*ts+20*ks;
     else if(sr!=null)f=0.7*t.score+30*sr;
+    if(NICHE>0&&d&&d.have>0){  // Discogs : peu de collectionneurs = plus confidentiel
+      const rar=1-Math.min(1,Math.log10(d.have+1)/5);
+      f=(f==null?t.score:f)+NICHE*18*(rar-0.4);
+      if(d.have<1000)tg.push(tag('rare sur Discogs','ok'));
+    }
     if(f!=null){
-      f=Math.min(100,Math.round(f));
+      f=Math.max(0,Math.min(100,Math.round(f)));
       $('r'+i).dataset.s=f;$('s'+i).textContent=f+'%';
       const L=$('r'+i).parentNode;[...L.children].sort((p,q)=>q.dataset.s-p.dataset.s).forEach(e=>L.appendChild(e));
     }
