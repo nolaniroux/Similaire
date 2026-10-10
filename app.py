@@ -256,8 +256,8 @@ def lb_similar(artist, niche):
         print("LISTENBRAINZ METADATA ECHEC", flush=True)
     n = len(firsts)
     print(f"LISTENBRAINZ: {n} artistes similaires (mode {mode})", flush=True)
-    return [{"name": names.get(i["recording_mbid"], ""), "artist": {"name": i.get("similar_artist_name", "")},
-             "match": round(0.45 - 0.3 * idx / max(1, n - 1), 3), "playcount": 0}
+    return [{"name": names.get(i["recording_mbid"], ""), "artist": {"name": i.get("similar_artist_name", ""), "mbid": i.get("similar_artist_mbid")},
+             "match": round((0.7 if niche else 0.45) - 0.3 * idx / max(1, n - 1), 3), "playcount": 0}
             for idx, i in enumerate(firsts)]
 
 
@@ -287,19 +287,79 @@ def merge_candidates(lfm, lb):
     return sorted(by.values(), key=lambda c: -float(c.get("match", 0)))
 
 
-def deezer_top(artist):
-    """Morceau le plus connu d'un artiste sur Deezer."""
+def lb_popularity(mbids):
+    """Nombre d'auditeurs distincts par artiste d'après ListenBrainz (une seule requête groupée)."""
+    mbids = list(dict.fromkeys(m for m in mbids if m))
+    out = {}
+    if not mbids:
+        return out
+    try:
+        r = HTTP.post("https://api.listenbrainz.org/1/popularity/artist", json={"artist_mbids": mbids}, timeout=20).json()
+        items = r if isinstance(r, list) else (r.get("payload") or r.get("artists") or [])
+        for i in items:
+            if isinstance(i, dict) and i.get("artist_mbid") and i.get("total_user_count") is not None:
+                out[i["artist_mbid"]] = int(i["total_user_count"])
+    except Exception:
+        print("LISTENBRAINZ POPULARITE ECHEC:", traceback.format_exc(), flush=True)
+    print(f"LISTENBRAINZ POPULARITE: {len(out)}/{len(mbids)} artistes trouvés", flush=True)
+    return out
+
+
+def rarity(r):
+    """0 = énorme succès ... 1 = très confidentiel. Moyenne des indices disponibles (Deezer, ListenBrainz)."""
+    vals = []
+    if r.get("rank", 0) > 0:
+        vals.append(1 - min(1.0, r["rank"] / 1_000_000))
+    if r.get("lb_users") is not None:
+        vals.append(1 - min(1.0, math.log10(r["lb_users"] + 1) / 6))
+    return sum(vals) / len(vals) if vals else 0.5
+
+
+def deezer_top(artist, niche=0):
+    """Un morceau d'un artiste sur Deezer : le plus connu, ou en mode niche le moins populaire de ses 10 titres phares."""
     d = deezer_get("https://api.deezer.com/search/artist", {"q": artist, "limit": 1})
     a = ((d or {}).get("data") or [None])[0]
     if not a or norm(a["name"]) != norm(artist):
         return None
-    t = deezer_get(f"https://api.deezer.com/artist/{a['id']}/top", {"limit": 1})
-    return ((t or {}).get("data") or [None])[0]
+    t = deezer_get(f"https://api.deezer.com/artist/{a['id']}/top", {"limit": 10})
+    items = (t or {}).get("data") or []
+    if not items:
+        return None
+    return items[0] if not niche else min(items, key=lambda x: x.get("rank", 0))
 
 
 # ---------- Claude (optionnel) : accords et instruments ----------
-INSTRUMENTS = ["guitare", "piano", "batterie", "basse", "synthétiseur", "violon",
-               "saxophone", "trompette", "flûte", "orgue", "percussions", "voix"]
+INSTRUMENTS = ["guitare saturée", "guitare claire", "guitare acoustique", "basse", "basse slap", "batterie",
+               "piano", "synthétiseur", "orgue", "violon", "cordes", "saxophone", "trompette", "cuivres",
+               "flûte", "percussions", "boîte à rythmes", "voix chantée", "voix rappée", "voix criée", "chœurs"]
+# instruments présents dans presque tous les morceaux rock/pop : ils comptent moins dans la comparaison
+COMMON = {norm(x) for x in ["basse", "batterie", "voix chantée", "chœurs"]}
+
+
+# mots de genre trop généraux : ils comptent moins que « funk », « post-punk », « trap »...
+GENERIC = {"rock", "pop", "music", "musique", "alternatif", "alternative", "moderne", "contemporain"}
+
+
+def genre_tokens(genres):
+    return {t for g in genres for t in re.findall(r"[a-zà-ÿ0-9]+", str(g).lower()) if len(t) > 1}
+
+
+def genre_sim(a, b):
+    """Similarité pondérée entre deux ensembles de mots de sous-genres."""
+    if not a or not b:
+        return 0.0
+    w = lambda x: 0.4 if x in GENERIC else 1.0
+    return sum(w(x) for x in a & b) / sum(w(x) for x in a | b)
+
+
+def inst_sim(a, b):
+    """Similarité pondérée (type Jaccard) entre deux ensembles d'instruments."""
+    if not a or not b:
+        return 0.0
+    w = lambda x: 0.4 if x in COMMON else 1.0
+    return sum(w(x) for x in a & b) / sum(w(x) for x in a | b)
+
+
 _desc_cache = {}
 
 
@@ -314,10 +374,12 @@ def describe_many(items):
     lines = "\n".join(f"{i}. {t} — {a}" for i, (t, a) in enumerate(items))
     prompt = (
         "Pour chacune de ces chansons, donne en français la progression d'accords typique "
-        "et les instruments principaux audibles. Pour les instruments, utilise uniquement "
-        f"des mots de cette liste : {', '.join(INSTRUMENTS)}.\n{lines}\n"
+        "et les instruments principaux audibles, plus 2 à 3 sous-genres précis en minuscules "
+        "(ex : funk rock, indie pop, post-punk, trap). Pour les instruments, utilise uniquement "
+        f"des mots de cette liste : {', '.join(INSTRUMENTS)}. Garde les 4 à 6 éléments les plus caractéristiques "
+        f"du son (la texture de la guitare compte : saturée, claire ou acoustique).\n{lines}\n"
         'Réponds avec un tableau JSON, un objet par chanson, dans le même ordre : '
-        '[{"i":0,"accords":"...","instruments":["..."]}]'
+        '[{"i":0,"accords":"...","instruments":["..."],"genres":["..."]}]'
     )
     try:
         r = HTTP.post(
@@ -333,7 +395,7 @@ def describe_many(items):
             return None, "Gemini : " + msg[:150]
         text = r["candidates"][0]["content"]["parts"][0]["text"]
         arr = json.loads(text[text.index("["): text.rindex("]") + 1])
-        out = {int(o["i"]): {"accords": o.get("accords", ""), "instruments": o.get("instruments", [])} for o in arr}
+        out = {int(o["i"]): {"accords": o.get("accords", ""), "instruments": o.get("instruments", []), "genres": o.get("genres", [])} for o in arr}
         _desc_cache[key] = out
         return out, ""
     except Exception:
@@ -345,7 +407,7 @@ def card(t):
     return {
         "title": t["title"], "artist": t["artist"]["name"],
         "cover": t["album"].get("cover_medium", ""), "link": t.get("link", ""),
-        "preview": t.get("preview", ""), "genre": deezer_genre(t["album"]["id"]),
+        "preview": t.get("preview", ""), "genre": deezer_genre(t["album"]["id"]), "rank": t.get("rank", 0),
     }
 
 
@@ -378,7 +440,7 @@ def similar():
         if a.lower() not in seen:  # un seul titre par artiste
             seen.add(a.lower())
             cands.append(c)
-        if len(cands) >= 30:
+        if len(cands) >= (45 if niche else 30):
             break
 
     def process(c):
@@ -386,7 +448,7 @@ def similar():
         src = c.get("src", [])
         t = (deezer_find(f'artist:"{art}" track:"{name}"') or deezer_find(f"{art} {name}")) if name else None
         if not t and "ListenBrainz" in src:
-            t = deezer_top(art)  # pas de titre connu : on prend son morceau le plus connu
+            t = deezer_top(art, niche)  # pas de titre connu : on prend son morceau le plus connu
         if not t:
             print("NON TROUVE SUR DEEZER:", art, "-", name, flush=True)
             return None
@@ -398,7 +460,8 @@ def similar():
         if src == ["ListenBrainz"] and res["genre"] and seed_card["genre"] and res["genre"] != seed_card["genre"]:
             print("LISTENBRAINZ ECARTE (genre different):", art, "-", res["genre"], flush=True)
             return None  # une seule source et un autre genre : trop risqué
-        score = max(0.05, 0.9 * float(c.get("match", 0)) - 0.05 * niche * popularity(c))
+        score = max(0.05, 0.9 * float(c.get("match", 0)) - 0.05 * niche * popularity(c)
+                    - 0.25 * niche * min(1.0, t.get("rank", 0) / 1_000_000))
         why = []
         if "Last.fm" in src:
             why.append("écoutes communes (Last.fm)")
@@ -408,6 +471,7 @@ def similar():
             score += 0.08
             why.append("confirmée par 2 sources")
         res["sources"] = src
+        res["artist_mbid"] = c["artist"].get("mbid") or ""
         plays = int(c.get("playcount") or 0)
         res["plays"] = plays
         if niche and 0 < plays < 500000:
@@ -421,6 +485,19 @@ def similar():
     with ThreadPoolExecutor(max_workers=3) as pool:
         results = [r for r in pool.map(process, cands) if r]
     print(f"CANDIDATS: {len(cands)} -> VERIFIES: {len(results)}", flush=True)
+    if niche:  # ListenBrainz : nombre d'auditeurs de chaque artiste
+        users = lb_popularity([r["artist_mbid"] for r in results if r.get("artist_mbid")])
+        for r in results:
+            if users.get(r.get("artist_mbid")) is not None:
+                r["lb_users"] = users[r["artist_mbid"]]
+    for r in results:
+        r["rarity"] = round(rarity(r), 2)
+        r["rare"] = r["rarity"] >= 0.55
+    if niche:  # vrai filtre de popularité (Deezer + ListenBrainz)
+        cap = [0, 0.35, 0.55][niche]
+        keep = [r for r in results if r["rarity"] >= cap]
+        print(f"NICHE {niche}: {len(keep)} titres assez confidentiels sur {len(results)}", flush=True)
+        results = keep if len(keep) >= 8 else sorted(results, key=lambda r: -r["rarity"])[:12]
     results.sort(key=lambda r: -r["score"])
     results = results[:30]
     info, err = describe_many([(seed["title"], seed["artist"]["name"])] + [(r["title"], r["artist"]) for r in results])
@@ -428,13 +505,20 @@ def similar():
     if info:
         seed_card.update(info.get(0, {}))
         ref = {norm(x) for x in seed_card.get("instruments", []) if x}
-        need = max(1, math.ceil(len(ref) / 2))  # au moins la moitié des instruments de la chanson
+        ref_distinct = ref - COMMON
+        sg = genre_tokens(seed_card.get("genres", []))
         for i, r in enumerate(results, 1):
             r.update(info.get(i, {}))
-            com = [x for x in r.get("instruments", []) if any(norm(x) == n or n in norm(x) for n in ref)]
-            r["same"] = bool(ref) and len(com) >= need
+            got = {norm(x) for x in r.get("instruments", []) if x}
+            sim = inst_sim(ref, got)
+            # mêmes instruments = forte similarité ET au moins un instrument distinctif en commun
+            r["same"] = bool(ref) and sim >= 0.5 and (bool(ref_distinct & got) or not ref_distinct)
             if r["same"]:
-                r["why"] += ", instruments communs : " + ", ".join(com)
+                r["score"] = min(100, r["score"] + round(10 * sim))
+            gs = genre_sim(sg, genre_tokens(r.get("genres", [])))
+            r["same_genre"] = gs >= 0.5
+            if r["same_genre"]:
+                r["score"] = min(100, r["score"] + round(10 * gs))
         grouped = bool(ref)
         if grouped:
             same = [r for r in results if r["same"]][:20]
